@@ -669,6 +669,10 @@ app.post("/register", async function(req, res) {
     }
 
     try {
+        // Normalize email/username
+        const normalizedEmail = String(email).trim().toLowerCase();
+        const normalizedUsername = String(username).trim().toLowerCase();
+
         // Check if referral code is valid (can be either referral code or user ID)
         let referrer = null;
         if (referralCode) {
@@ -681,7 +685,7 @@ app.post("/register", async function(req, res) {
                 referrer = await User.findOne({ referralCode: referralCode });
             }
             if (!referrer) {
-                return res.status(400).json({ error: 'Invalid referral code' });
+                console.warn(`Ignoring invalid referral code: ${referralCode}`);
             }
         }
 
@@ -689,8 +693,8 @@ app.post("/register", async function(req, res) {
     const verificationToken = crypto.randomBytes(32).toString('hex');
         
         User.register({ 
-            username: email, 
-            email: email, 
+            username: normalizedUsername, 
+            email: normalizedEmail, 
             verified: DISABLE_EMAILS ? true : false, // Auto-verify for testing when emails are disabled
             verificationToken: DISABLE_EMAILS ? undefined : verificationToken,
             referredBy: referrer ? referrer._id : null
@@ -796,7 +800,7 @@ async function checkAndCompleteReferrals(userId) {
                 await referrer.save();
                 console.log(`🎁 REFERRAL BONUS: +$1.5 to ${referrer.username}. Additional balance ${oldAdditional} → ${referrer.additionalBalance}`);
             }
-
+            
             console.log(`Referral completed: User ${user.username} (${userId}) has deposited $10, completing referral from ${referral.referrer}`);
         }
     } catch (error) {
