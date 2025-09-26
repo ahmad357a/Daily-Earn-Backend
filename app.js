@@ -691,10 +691,18 @@ app.post("/register", async function(req, res) {
 
     // Generate verification token
     const verificationToken = crypto.randomBytes(32).toString('hex');
+    
+        // Pre-generate a unique referral code to avoid null on initial insert
+        let userReferralCode = generateReferralCode();
+        // Ensure uniqueness (extremely low chance of loop, but safe)
+        while (await User.exists({ referralCode: userReferralCode })) {
+            userReferralCode = generateReferralCode();
+        }
         
         User.register({ 
             username: normalizedUsername, 
             email: normalizedEmail, 
+            referralCode: userReferralCode,
             verified: DISABLE_EMAILS ? true : false, // Auto-verify for testing when emails are disabled
             verificationToken: DISABLE_EMAILS ? undefined : verificationToken,
             referredBy: referrer ? referrer._id : null
@@ -712,10 +720,7 @@ app.post("/register", async function(req, res) {
             return res.status(400).json({ error: errorMessage });
         }
 
-            // Generate unique referral code for the new user
-            const userReferralCode = generateReferralCode();
-            user.referralCode = userReferralCode;
-            await user.save();
+            // Referral code already set on initial insert
 
             // Create referral record if user was referred
             if (referrer) {
