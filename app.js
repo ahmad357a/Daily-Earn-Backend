@@ -787,7 +787,16 @@ async function checkAndCompleteReferrals(userId) {
             // Update referral status to completed
             referral.status = 'completed';
             await referral.save();
-            
+
+            // Apply referral bonus to referrer
+            const referrer = await User.findById(referral.referrer);
+            if (referrer) {
+                const oldAdditional = referrer.additionalBalance || 0;
+                referrer.additionalBalance = oldAdditional + 1.5;
+                await referrer.save();
+                console.log(`🎁 REFERRAL BONUS: +$1.5 to ${referrer.username}. Additional balance ${oldAdditional} → ${referrer.additionalBalance}`);
+            }
+
             console.log(`Referral completed: User ${user.username} (${userId}) has deposited $10, completing referral from ${referral.referrer}`);
         }
     } catch (error) {
@@ -839,6 +848,14 @@ app.get('/verify-email', async (req, res) => {
                 if (referral && user.hasDeposited) { // Check if user has deposited $10
                     referral.status = 'completed'; // Update referral status to completed
                     await referral.save();
+                    // Apply referral bonus to referrer
+                    const referrer = await User.findById(user.referredBy);
+                    if (referrer) {
+                        const oldAdditional = referrer.additionalBalance || 0;
+                        referrer.additionalBalance = oldAdditional + 1.5;
+                        await referrer.save();
+                        console.log(`🎁 REFERRAL BONUS: +$1.5 to ${referrer.username}. Additional balance ${oldAdditional} → ${referrer.additionalBalance}`);
+                    }
                     console.log(`Referral completed: ${user.referredBy} referred ${user.username} deposit $10`);
                 } else if (referral) {
                     // Keep referral as pending - will be completed when user deposits $10
