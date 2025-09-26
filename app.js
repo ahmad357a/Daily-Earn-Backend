@@ -734,6 +734,15 @@ app.post("/register", async function(req, res) {
                 // Log referral completion for testing
                 if (DISABLE_EMAILS) {
                     console.log(`📧 EMAIL DISABLED: Referral auto-completed - ${referrer.username} referred ${user.username}`);
+                    // Apply referral bonus immediately when auto-completing referrals
+                    try {
+                        const oldAdditional = referrer.additionalBalance || 0;
+                        referrer.additionalBalance = oldAdditional + 1.5;
+                        await referrer.save();
+                        console.log(`🎁 REFERRAL BONUS: +$1.5 to ${referrer.username}. Additional balance ${oldAdditional} → ${referrer.additionalBalance}`);
+                    } catch (bonusErr) {
+                        console.error('Error applying referral bonus on auto-complete:', bonusErr);
+                    }
                 }
             }
 
@@ -2317,7 +2326,7 @@ async function calculateUserBalance(userId) {
     ]);
     const totalWithdrawn = totalWithdrawals.length > 0 ? totalWithdrawals[0].total : 0;
 
-    // Get additional balance (admin-added amount)
+    // Get additional balance (admin-added amount, includes referral bonuses)
     const additionalBalance = user.additionalBalance || 0;
 
     // Calculate balance: (deposits - $10) + task rewards + additional balance - withdrawals
