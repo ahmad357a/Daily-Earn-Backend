@@ -80,6 +80,9 @@ const ALLOWED_ORIGINS = [
   // VPS IP addresses
   'http://31.97.39.46:8080',
   'http://31.97.39.46:3000',
+  // New Railway app origins
+  'https://dailyadmin-admin-production.up.railway.app',
+  'https://daily-earnfrontend-production.up.railway.app',
 ];
 
 // Log allowed origins for debugging
