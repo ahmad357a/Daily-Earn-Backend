@@ -702,8 +702,12 @@ app.post("/register", async function(req, res) {
         if (err) {
             console.error('Registration error:', err); // Log registration errors
             let errorMessage = 'Registration failed';
-            if (err.name === 'UserExistsError') {
+            // Common duplicate cases
+            if (err.name === 'UserExistsError' || err.code === 11000) {
                 errorMessage = 'User already exists with this email';
+            } else if (typeof err.message === 'string' && err.message.trim().length > 0) {
+                // Surface validation/message if present
+                errorMessage = err.message;
             }
             return res.status(400).json({ error: errorMessage });
         }
