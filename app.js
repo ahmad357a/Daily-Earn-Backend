@@ -3654,13 +3654,13 @@ app.get('/api/withdrawal-requirements', ensureAuthenticated, async (req, res) =>
     ]).then(result => result[0]?.total || 0);
     console.log('Referrals in period:', referralsInPeriod);
 
-    // Check total deposit amount (not count)
+    // Check total deposit amount (confirmed) in current 15-day period
     const totalDeposits = await Deposit.aggregate([
-      { $match: { userId: userId, status: 'confirmed' } },
+      { $match: { userId: userId, status: 'confirmed', createdAt: { $gte: periodStart, $lte: periodEnd } } },
       { $group: { _id: null, total: { $sum: '$amount' } } }
     ]);
     const totalDepositAmount = totalDeposits.length > 0 ? totalDeposits[0].total : 0;
-    console.log('Total deposit amount:', totalDepositAmount);
+    console.log('Total deposit amount in period:', totalDepositAmount);
 
     // Check lucky draw participations in current 15-day period (only approved ones)
     const luckyDrawInPeriod = await Participation.countDocuments({
@@ -3704,20 +3704,18 @@ app.get('/api/withdrawal-requirements', ensureAuthenticated, async (req, res) =>
     requirement.updatedAt = now;
     await requirement.save();
 
-    const response = {
-      success: true,
-      requirement: {
-        periodStart: requirement.periodStart,
-        periodEnd: requirement.periodEnd,
-        requirements: requirement.requirements,
-        allRequirementsMet: requirement.allRequirementsMet,
-        balanceReset: requirement.balanceReset,
-        daysLeft: Math.ceil((periodEnd - now) / (1000 * 60 * 60 * 24))
-      }
+    const payload = {
+      periodStart: requirement.periodStart,
+      periodEnd: requirement.periodEnd,
+      requirements: requirement.requirements,
+      allRequirementsMet: requirement.allRequirementsMet,
+      balanceReset: requirement.balanceReset,
+      daysLeft: Math.ceil((periodEnd - now) / (1000 * 60 * 60 * 24))
     };
 
-    console.log('Sending response:', response);
-    res.json(response);
+    console.log('Sending response:', { success: true, requirements: payload });
+    // Return under `requirements` to match frontend expectations
+    res.json({ success: true, requirements: payload });
 
   } catch (error) {
     console.error('Error getting withdrawal requirements:', error);
@@ -3735,9 +3733,9 @@ app.post('/api/withdrawal-request', ensureAuthenticated, async (req, res) => {
     const { amount, walletAddress } = req.body;
     const userId = req.user._id;
 
-    // Validate amount
-    if (!amount || amount < 20) {
-      return res.status(400).json({ success: false, error: 'Minimum withdrawal amount is $20' });
+    // Validate amount (align with frontend minimum $1)
+    if (!amount || amount < 1) {
+      return res.status(400).json({ success: false, error: 'Minimum withdrawal amount is $1' });
     }
 
     // Check user balance
@@ -3824,6 +3822,96 @@ app.get('/api/withdrawal-history', ensureAuthenticated, async (req, res) => {
   } catch (error) {
     console.error('Error getting withdrawal history:', error);
     res.status(500).json({ success: false, error: 'Failed to get withdrawal history' });
+  }
+});
+
+// Admin maintenance: Recalculate withdrawal requirements for all users for current period
+app.post('/api/admin/recalculate-withdrawal-requirements', async (req, res) => {
+  try {
+    const token = req.headers['x-maintenance-token'] || req.headers['x-maint-token'];
+    if (!process.env.MAINT_TOKEN || token !== process.env.MAINT_TOKEN) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    const now = new Date();
+    const periodStart = new Date(now);
+    periodStart.setDate(periodStart.getDate() - (periodStart.getDate() % 15));
+    periodStart.setHours(0, 0, 0, 0);
+
+    const periodEnd = new Date(periodStart);
+    periodEnd.setDate(periodEnd.getDate() + 15);
+    periodEnd.setHours(23, 59, 59, 999);
+
+    const users = await User.find({}, { _id: 1 });
+    let created = 0;
+    let updated = 0;
+
+    for (const u of users) {
+      const userId = u._id;
+
+      let requirement = await WithdrawalRequirement.findOne({
+        userId,
+        periodStart: { $lte: now },
+        periodEnd: { $gte: now }
+      });
+
+      if (!requirement) {
+        requirement = new WithdrawalRequirement({
+          userId,
+          periodStart,
+          periodEnd,
+          requirements: {
+            referrals: { required: 1, completed: 0, met: false },
+            deposit: { required: 10, completed: 0, met: false },
+            luckyDraw: { required: 1, completed: 0, met: false }
+          }
+        });
+        created += 1;
+      }
+
+      const referralsInPeriod = await Referral.aggregate([
+        { $match: { referrer: userId, createdAt: { $gte: periodStart, $lte: periodEnd } } },
+        { $lookup: { from: 'users', localField: 'referred', foreignField: '_id', as: 'referredUser' } },
+        { $match: { 'referredUser.hasDeposited': true } },
+        { $count: 'total' }
+      ]).then(result => result[0]?.total || 0);
+
+      const totalDeposits = await Deposit.aggregate([
+        { $match: { userId: userId, status: 'confirmed', createdAt: { $gte: periodStart, $lte: periodEnd } } },
+        { $group: { _id: null, total: { $sum: '$amount' } } }
+      ]);
+      const totalDepositAmount = totalDeposits.length > 0 ? totalDeposits[0].total : 0;
+
+      const luckyDrawInPeriod = await Participation.countDocuments({
+        user: userId,
+        createdAt: { $gte: periodStart, $lte: periodEnd },
+        submittedButton: true
+      });
+
+      requirement.requirements.referrals.completed = referralsInPeriod;
+      requirement.requirements.referrals.met = referralsInPeriod >= 1;
+
+      requirement.requirements.deposit.completed = totalDepositAmount;
+      requirement.requirements.deposit.met = totalDepositAmount >= 10;
+
+      requirement.requirements.luckyDraw.completed = luckyDrawInPeriod;
+      requirement.requirements.luckyDraw.met = luckyDrawInPeriod >= 1;
+
+      requirement.allRequirementsMet = (
+        requirement.requirements.referrals.met &&
+        requirement.requirements.deposit.met &&
+        requirement.requirements.luckyDraw.met
+      );
+
+      requirement.updatedAt = now;
+      await requirement.save();
+      updated += 1;
+    }
+
+    res.json({ success: true, users: users.length, created, updated, periodStart, periodEnd });
+  } catch (error) {
+    console.error('Error recalculating withdrawal requirements for all users:', error);
+    res.status(500).json({ success: false, error: 'Failed to recalculate withdrawal requirements' });
   }
 });
 
