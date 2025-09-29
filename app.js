@@ -3622,7 +3622,7 @@ app.get('/api/withdrawal-requirements', ensureAuthenticated, async (req, res) =>
         periodStart,
         periodEnd,
         requirements: {
-          referrals: { required: 1, completed: 0, met: false }, // Changed from 2 to 1
+          referrals: { required: 1, completed: 0, met: true }, // COMMENTED OUT: Set met to true to bypass requirement
           deposit: { required: 10, completed: 0, met: false }, // Amount in dollars
           luckyDraw: { required: 1, completed: 0, met: false }
         }
@@ -3636,6 +3636,8 @@ app.get('/api/withdrawal-requirements', ensureAuthenticated, async (req, res) =>
     console.log('User found:', !!user);
     
     // Check confirmed referrals where the referred user has deposited in this period
+    // COMMENTED OUT: Referral requirement temporarily disabled
+    /*
     const referralsInPeriod = await Referral.aggregate([
       { $match: { 
         referrer: userId,
@@ -3653,6 +3655,8 @@ app.get('/api/withdrawal-requirements', ensureAuthenticated, async (req, res) =>
       { $count: 'total' }
     ]).then(result => result[0]?.total || 0);
     console.log('Referrals in period:', referralsInPeriod);
+    */
+    const referralsInPeriod = 1; // Set to 1 to always meet requirement
 
     // Check total deposit amount (confirmed) in current 15-day period
     const totalDeposits = await Deposit.aggregate([
@@ -3672,7 +3676,7 @@ app.get('/api/withdrawal-requirements', ensureAuthenticated, async (req, res) =>
 
     // Update requirement status
     requirement.requirements.referrals.completed = referralsInPeriod;
-    requirement.requirements.referrals.met = referralsInPeriod >= 1; // Changed from 2 to 1
+    requirement.requirements.referrals.met = true; // COMMENTED OUT: Always set to true to bypass referral requirement
     
     requirement.requirements.deposit.completed = totalDepositAmount;
     requirement.requirements.deposit.met = totalDepositAmount >= 10;
@@ -3738,10 +3742,48 @@ app.post('/api/withdrawal-request', ensureAuthenticated, async (req, res) => {
       return res.status(400).json({ success: false, error: 'Minimum withdrawal amount is $1' });
     }
 
-    // Check user balance
+    // Check user balance using calculated balance instead of stored balance
     const user = await User.findById(userId);
-    if (!user || user.balance < amount) {
-      return res.status(400).json({ success: false, error: 'Insufficient balance' });
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    // Calculate actual available balance: (total deposits - $10) + task rewards - total withdrawn
+    const withdrawalCheckDeposits = await Deposit.aggregate([
+      { $match: { userId: userId, status: 'confirmed' } },
+      { $group: { _id: null, total: { $sum: '$amount' } } }
+    ]);
+    const withdrawalCheckDepositAmount = withdrawalCheckDeposits.length > 0 ? withdrawalCheckDeposits[0].total : 0;
+
+    const withdrawalCheckTaskRewards = await TaskSubmission.aggregate([
+      { $match: { userId: userId, status: 'approved' } },
+      { $lookup: { from: 'tasks', localField: 'taskId', foreignField: '_id', as: 'task' } },
+      { $unwind: '$task' },
+      { $group: { _id: null, total: { $sum: '$task.reward' } } }
+    ]);
+    const withdrawalCheckTaskRewardAmount = withdrawalCheckTaskRewards.length > 0 ? withdrawalCheckTaskRewards[0].total : 0;
+
+    const withdrawalCheckWithdrawn = await WithdrawalRequest.aggregate([
+      { $match: { userId: userId, status: { $in: ['completed', 'pending', 'processing'] } } },
+      { $group: { _id: null, total: { $sum: '$amount' } } }
+    ]);
+    const withdrawalCheckWithdrawnAmount = withdrawalCheckWithdrawn.length > 0 ? withdrawalCheckWithdrawn[0].total : 0;
+
+    const withdrawalCheckDepositContribution = Math.max(0, withdrawalCheckDepositAmount - 10);
+    const availableBalance = Math.max(0, withdrawalCheckDepositContribution + withdrawalCheckTaskRewardAmount - withdrawalCheckWithdrawnAmount);
+
+    if (availableBalance < amount) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Insufficient balance',
+        details: {
+          availableBalance: availableBalance,
+          requestedAmount: amount,
+          totalDeposits: withdrawalCheckDepositAmount,
+          totalTaskRewards: withdrawalCheckTaskRewardAmount,
+          totalWithdrawn: withdrawalCheckWithdrawnAmount
+        }
+      });
     }
 
     // Check withdrawal requirements
@@ -3774,11 +3816,11 @@ app.post('/api/withdrawal-request', ensureAuthenticated, async (req, res) => {
 
     await withdrawalRequest.save();
 
-    // Recalculate user balance using comprehensive formula
-    const balanceData = await calculateUserBalance(userId);
-    user.balance = balanceData.balance;
+    // Update user balance to reflect the new withdrawal request
+    const newAvailableBalance = availableBalance - amount;
+    user.balance = newAvailableBalance;
     await user.save();
-    console.log(`✅ WITHDRAWAL REQUEST: Balance recalculated to $${balanceData.balance} (Deposits: $${balanceData.totalDeposits}, Tasks: $${balanceData.totalTaskRewards}, Withdrawals: $${balanceData.totalWithdrawn})`);
+    console.log(`✅ WITHDRAWAL REQUEST: Balance updated to $${newAvailableBalance} (Available: $${availableBalance}, Requested: $${amount})`);
 
     res.json({
       success: true,
@@ -3861,7 +3903,7 @@ app.post('/api/admin/recalculate-withdrawal-requirements', async (req, res) => {
           periodStart,
           periodEnd,
           requirements: {
-            referrals: { required: 1, completed: 0, met: false },
+            referrals: { required: 1, completed: 0, met: true }, // COMMENTED OUT: Set met to true to bypass requirement
             deposit: { required: 10, completed: 0, met: false },
             luckyDraw: { required: 1, completed: 0, met: false }
           }
@@ -3869,12 +3911,16 @@ app.post('/api/admin/recalculate-withdrawal-requirements', async (req, res) => {
         created += 1;
       }
 
+      // COMMENTED OUT: Referral requirement temporarily disabled
+      /*
       const referralsInPeriod = await Referral.aggregate([
         { $match: { referrer: userId, createdAt: { $gte: periodStart, $lte: periodEnd } } },
         { $lookup: { from: 'users', localField: 'referred', foreignField: '_id', as: 'referredUser' } },
         { $match: { 'referredUser.hasDeposited': true } },
         { $count: 'total' }
       ]).then(result => result[0]?.total || 0);
+      */
+      const referralsInPeriod = 1; // Set to 1 to always meet requirement
 
       const totalDeposits = await Deposit.aggregate([
         { $match: { userId: userId, status: 'confirmed', createdAt: { $gte: periodStart, $lte: periodEnd } } },
@@ -3889,7 +3935,7 @@ app.post('/api/admin/recalculate-withdrawal-requirements', async (req, res) => {
       });
 
       requirement.requirements.referrals.completed = referralsInPeriod;
-      requirement.requirements.referrals.met = referralsInPeriod >= 1;
+      requirement.requirements.referrals.met = true; // COMMENTED OUT: Always set to true to bypass referral requirement
 
       requirement.requirements.deposit.completed = totalDepositAmount;
       requirement.requirements.deposit.met = totalDepositAmount >= 10;
